@@ -5,26 +5,42 @@
 #include <mutex>
 #include <condition_variable>
 #include <queue>
+#include <experimental/filesystem>
+#include <fstream>
+
+template <typename T>
+T deserializeForStoringQueue(std::string&&);
+
+template <typename T>
+std::string serializeForStoringQueue(T&&);
+
 
 namespace notifying_queue
 {
-template <typename T>
+//Theese containers are not exception safe, and it is enough for the task
+
+template <typename T, bool file_storable = true>
 class Queue
 {
  public:
-  Queue() = default;
+  template <bool f = file_storable, typename std::enable_if<f, int>::type = 0>
+  Queue(const std::size_t capacity = 1024 * 1024) : capacity_{capacity} {}
+  template <bool f = file_storable, typename std::enable_if<!f, int>::type = 0>
+  Queue() {}
+
   Queue(const Queue&) = delete;
   Queue& operator=(const Queue&) = delete;
 
   bool waitAndPop(T& ret)
   {
     std::unique_lock lk{m_};
-    cv_.wait(lk, [&q{queue_}, &f{will_not_grow_}](){ return !q.empty() || f.load();});
+    cv_.wait(lk, [&size{size_}, &f{will_not_grow_}](){ return size || f.load();});
 
-    if (!queue_.empty())
+    if (size())
     {
-      ret = std::move(queue_.front());
-      queue_.pop();
+      --size_;
+
+      internalPop(ret);
 
       return true;
     }
@@ -36,19 +52,23 @@ class Queue
   {
     std::lock_guard lk{m_};
 
-    if (queue_.empty())
+    if (!size())
     {
       return false;
     }
 
-    ret = std::move(queue_.front());
+    --size_;
+    internalPop(ret);
+
     return true;
   }
 
   void push(T el)
   {
     std::lock_guard lk{m_};
-    queue_.push(std::move(el));
+
+    internalPush(std::move(el));
+    ++size_;
 
     cv_.notify_one();
   }
@@ -60,34 +80,138 @@ class Queue
   }
 
  protected:
+  std::size_t size() const noexcept
+  {
+    return size_;
+  }
+
+  //There is the contract that our container is not empty
+  void internalPop(T& el)
+  {
+    el = std::move(queue_.front());
+    queue_.pop();
+
+    if constexpr (!file_storable)
+    {
+      return;
+    }
+
+    if (!queue_.empty())
+    {
+      return;
+    }
+
+    if (first_stored_file_num_ != -1)
+    {
+      const std::string file_name{file_names_prefix_ + std::to_string(first_stored_file_num_++)};
+      std::ifstream file{file_name};
+      for (int i = 0; i < capacity_; ++i)
+      {
+        std::string tmp;
+
+	file >> tmp;
+
+        queue_.push(deserializeForStoringQueue<T>(std::move(tmp)));
+      }
+
+      std::experimental::filesystem::remove(file_name);
+      if (first_stored_file_num_ > last_stored_file_num_)
+      {
+        first_stored_file_num_ = last_stored_file_num_ = -1;
+      }
+
+      return;
+    }
+
+
+    for (; !queue_to_store_.empty(); queue_to_store_.pop())
+    {
+      queue_.push(std::move(queue_to_store_.front()));
+    }
+  }
+
+  template <bool f = file_storable>
+  typename std::enable_if<f, void>::type internalPush(T&& el)
+  {
+    if (!queue_to_store_.empty() || first_stored_file_num_ != -1)
+    {
+      if (queue_to_store_.size() < capacity_)
+      {
+        queue_to_store_.push(std::move(el));
+	return;
+      }
+
+      if (first_stored_file_num_ == -1)
+      {
+        first_stored_file_num_ = 0;
+      }
+
+      std::ofstream store_file{file_names_prefix_ + std::to_string(++last_stored_file_num_)};
+
+      for (; !queue_to_store_.empty(); queue_to_store_.pop())
+      {
+        store_file << serializeForStoringQueue(std::move(queue_to_store_.front()));
+	store_file << '\n';
+      }
+
+      queue_to_store_.push(std::move(el));
+
+      return;
+    }
+
+    if (queue_.size() < capacity_)
+    {
+      queue_.push(std::move(el));
+      return;
+    }
+
+    queue_to_store_.push(std::move(el));
+  }
+
+  template <bool f = file_storable>
+  typename std::enable_if<!f, void>::type internalPush(T&& el)
+  {
+    queue_.push(std::move(el));
+  }
+
+  inline static const std::string file_names_prefix_{"tmp_queue"};
+
   std::queue<T> queue_;
+
+  std::queue<T> queue_to_store_;
+  const std::size_t capacity_{};
+
+  int first_stored_file_num_{-1};
+  int last_stored_file_num_{-1};
 
   mutable std::mutex m_;
   std::condition_variable cv_;
 
   std::atomic_bool will_not_grow_{false};
+
+  std::size_t size_{0};
 };
 
-template <typename T>
-class DoublePopQueue : public Queue<T>
+template <typename T, bool file_storable = true>
+class DoublePopQueue : public Queue<T, file_storable>
 {
-  using Base = Queue<T>;
+  using Base = Queue<T, file_storable>;
  public:
   using Base::waitAndPop;
   bool waitAndPop(T& first, T& second)
   {
     std::unique_lock lk{Base::m_};
-    Base::cv_.wait(lk, [&q{Base::queue_}, &f{Base::will_not_grow_}]() { return q.size() > 1 || f.load(); });
+    Base::cv_.wait(lk, [&size{Base::size_}, &f{Base::will_not_grow_}]() { return size > 1 || f.load(); });
 
     if (Base::will_not_grow_) {
       return false;
     }
 
-    //This is not exception safe, but ok for us, cause we want to crash that way
-    first = std::move(Base::queue_.front());
-    Base::queue_.pop();
-    second = std::move(Base::queue_.front());
-    Base::queue_.pop();
+    Base::size_ -= 2;
+
+    Base::internalPop(first);
+    Base::internalPop(second);
+
     return true;
   }
 
@@ -96,14 +220,17 @@ class DoublePopQueue : public Queue<T>
     std::unique_lock lk{Base::m_};
     Base::cv_.wait(lk, [&q{Base::queue_}](){ return !q.empty();});
 
-    ret = std::move(Base::queue_.front());
-    Base::queue_.pop();
+    --Base::size_;
+    Base::internalPop(ret);
   }
 
   void push(T el)
   {
     std::lock_guard lk{Base::m_};
-    Base::queue_.push(std::move(el));
+
+    ++Base::size_;
+
+    Base::internalPush(std::move(el));
 
     if (Base::queue_.size() > 1)
     {

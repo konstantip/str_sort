@@ -11,11 +11,43 @@
 
 #include <notifying_queue.hpp>
 
+template <typename T>
+T deserializeForStoringQueue(std::string&&);
+
+template <>
+std::string deserializeForStoringQueue<std::string>(std::string&& str)
+{
+  return std::move(str);
+}
+
+//It will not be called in our code, but it is too long to write Queue specialisation for std::string
+template <>
+std::vector<std::string> deserializeForStoringQueue<std::vector<std::string>>(std::string&&)
+{
+  return {};
+}
+
+template <typename T>
+std::string serializeForStoringQueue(T&&);
+
+template<>
+std::string serializeForStoringQueue<std::string>(std::string&& str)
+{
+  return std::move(str);
+}
+
+template<>
+std::string serializeForStoringQueue<std::vector<std::string>>(std::vector<std::string>&& arg)
+{
+  return {};
+}
+
 //This is the contract
 constexpr std::size_t max_string_size{1000};
 //This is not size of raw available memory,
 // but is estimated num of strings that we can contain
-constexpr std::size_t max_strings_in_memory{12000};
+constexpr std::size_t max_strings_in_memory{120000};
+constexpr std::size_t files_queue_capacity{1024 * 1024};
 
 void waitForFreeMemory(std::condition_variable& cv, std::atomic_size_t& blocks_in_memory,
                        const std::size_t max_blocks_in_memory)
@@ -185,10 +217,9 @@ void processReduce(notifying_queue::DoublePopQueue<std::string>& files_queue,
     {
       std::ofstream target_file{new_file_name};
       std::ifstream file1{filename1}, file2{filename2};
-
+     
       merge(file1, file2, target_file, working_threads_num);
     }
-
     files_queue.push(std::move(new_file_name));
 
     std::experimental::filesystem::remove(filename1);
@@ -234,7 +265,7 @@ struct ThreadAction
   }
   std::atomic_size_t& num_of_working_threads;
   std::atomic_size_t& num_of_remaining_files;
-  notifying_queue::Queue<std::vector<std::string>>& map_queue;
+  notifying_queue::Queue<std::vector<std::string>, false>& map_queue;
   std::condition_variable& may_continue_reading;
   std::atomic_size_t& blocks_in_memory;
   notifying_queue::DoublePopQueue<std::string>& file_names;
@@ -273,7 +304,7 @@ int main(const int argc, const char* const argv[])
   //I could use byte buffers instead of vectors of strings (to avoid allocations), it might increase performance
   //But I guess allocations is not bottle neck here because io operations probably take much more time
   //And coding with bytes buffers would take 2 hours more
-  notifying_queue::Queue<std::vector<std::string>> raw_strings_queue;
+  notifying_queue::Queue<std::vector<std::string>, false> raw_strings_queue;
   std::condition_variable may_continue;
   std::atomic_size_t blocks_in_memory{0};
 
@@ -281,7 +312,7 @@ int main(const int argc, const char* const argv[])
   std::atomic_size_t num_of_remaining_files{0};
   std::atomic_size_t files_enumerator{0};
 
-  notifying_queue::DoublePopQueue<std::string> file_names;
+  notifying_queue::DoublePopQueue<std::string> file_names{files_queue_capacity};
 
   for (std::size_t i{}; i < num_of_threads_to_create; ++i)
   {

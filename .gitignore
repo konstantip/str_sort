@@ -2,3 +2,7 @@
 check
 generate
 sort
+str_array.txt
+result
+*/.*.swp
+tmp*

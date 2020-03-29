@@ -1,0 +1,1 @@
+/usr/bin/c++     CMakeFiles/generate.dir/main.cpp.o  -o generate 

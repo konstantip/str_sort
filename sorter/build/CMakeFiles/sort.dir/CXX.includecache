@@ -1,0 +1,42 @@
+#IncludeRegexLine: ^[ 	]*[#%][ 	]*(include|import)[ 	]*[<"]([^">]+)([">])
+
+#IncludeRegexScan: ^.*$
+
+#IncludeRegexComplain: ^$
+
+#IncludeRegexTransform: 
+
+.././notifying_queue.hpp
+atomic
+-
+mutex
+-
+condition_variable
+-
+queue
+-
+
+/home/pogorelov/test_task/sorter/main.cpp
+algorithm
+-
+atomic
+-
+condition_variable
+-
+iostream
+-
+list
+-
+fstream
+-
+mutex
+-
+thread
+-
+experimental/filesystem
+-
+stdexcept
+-
+notifying_queue.hpp
+-
+

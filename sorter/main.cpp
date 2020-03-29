@@ -68,12 +68,9 @@ void waitAndReserve(std::condition_variable& cv, std::atomic_size_t& blocks_in_m
   portion.reserve(size);
 }
 
-void finalize(std::ifstream& file, std::list<std::string>& strs, std::ofstream& target)
+void finalize(std::ifstream& file, const std::string& str, std::ofstream& target)
 {
-  for (const auto& el : strs)
-  {
-    target << el << '\n';
-  }
+  target << str << '\n';
 
   for (;;)
   {
@@ -88,85 +85,41 @@ void finalize(std::ifstream& file, std::list<std::string>& strs, std::ofstream& 
   }
 }
 
-void merge(std::ifstream& file1, std::ifstream& file2, std::ofstream& target,
-           std::atomic_size_t& working_threads_num)
+void merge(std::ifstream& file1, std::ifstream& file2, std::ofstream& target)
 {
-  //It is bad for cache, but easier for developer (dequeue probably would work faster)
-  std::list<std::string> file1_strings, file2_strings;
-
-  for (; !file1.eof() || !file2.eof();)
+  std::string str1, str2;
+  str1.reserve(1000);
+  str2.reserve(1000);
+  
+  file1 >> str1;
+  file2 >> str2;
+  for (;;)
   {
-    const std::size_t max_strings_in_current_thread = max_strings_in_memory /
-        working_threads_num.fetch_add(0, std::memory_order_relaxed);
-
-    std::list<std::string> merged_strings;
-
-    for (int i = 0; file1_strings.size() < max_strings_in_current_thread / 2 && !file1.eof(); ++i)
+    if (str1 < str2)
     {
-      std::string tmp;
-      file1 >> tmp;
+      target << str1 << '\n';
+      file1 >> str1;
       if (file1.eof())
       {
-        break;
+        finalize(file2, str2, target);
+	return;
       }
-
-      file1_strings.push_back(std::move(tmp));
     }
-
-    for (int i = 0; file2_strings.size() < max_strings_in_current_thread - file1_strings.size() && !file2.eof(); ++i)
+    else
     {
-      std::string tmp;
-      file2 >> tmp;
+      target << str2 << '\n';
+      file2 >> str2;
       if (file2.eof())
       {
-        break;
+        finalize(file1, str1, target);
+	return;
       }
-
-      file2_strings.push_back(std::move(tmp));
-    }
-    //Way to use all memory
-    for (int i = 0; file1_strings.size() < max_strings_in_current_thread - file2_strings.size() && !file1.eof(); ++i)
-    {
-      std::string tmp;
-      file1 >> tmp;
-      if (file1.eof())
-      {
-        break;
-      }
-
-      file1_strings.push_back(std::move(tmp));
-    }
-
-    if (file1.eof() && file1_strings.empty())
-    {
-      finalize(file2, file2_strings, target);
-      return;
-    }
-    if (file2.eof() && file2_strings.empty())
-    {
-      finalize(file1, file1_strings, target);
-      return;
-    }
-
-    for (auto it1 = file1_strings.begin(), it2 = file2_strings.begin(); it1 != file1_strings.cend() && it2 != file2_strings.cend();)
-    {
-      using Pair = std::pair<decltype(it1)&, std::list<std::string>&>;
-      const Pair p = *it1 < *it2 ? Pair{it1, file1_strings} : Pair{it2, file2_strings};
-      merged_strings.splice(merged_strings.end(), p.second, p.first++);
-    }
-
-    for (const auto& el : merged_strings)
-    {
-      target << el << '\n';
     }
   }
-  finalize(file2, file2_strings, target);
-  finalize(file1, file1_strings, target);
 }
 
 template <bool is_main_thread = false>
 void processReduce(notifying_queue::DoublePopQueue<std::string>& files_queue,
-                   std::atomic_size_t& working_threads_num,
                    std::atomic_size_t& files_enumerator,
                    std::atomic_size_t& num_of_remaining_files,
                    const std::size_t thread_num)
@@ -187,7 +140,6 @@ void processReduce(notifying_queue::DoublePopQueue<std::string>& files_queue,
     {
       if (remaining_files / 2 - 1 < thread_num)
       {
-        working_threads_num.fetch_sub(1, std::memory_order_relaxed);
         break;
       }
     }
@@ -206,7 +158,6 @@ void processReduce(notifying_queue::DoublePopQueue<std::string>& files_queue,
     {
       if (!files_queue.waitAndPop(filename1, filename2))
       {
-        working_threads_num.fetch_sub(1, std::memory_order_relaxed);
         return;
       }
     }
@@ -218,7 +169,7 @@ void processReduce(notifying_queue::DoublePopQueue<std::string>& files_queue,
       std::ofstream target_file{new_file_name};
       std::ifstream file1{filename1}, file2{filename2};
      
-      merge(file1, file2, target_file, working_threads_num);
+      merge(file1, file2, target_file);
     }
     files_queue.push(std::move(new_file_name));
 
@@ -261,9 +212,8 @@ struct ThreadAction
       may_continue_reading.notify_one();
     }
 
-    processReduce(file_names, num_of_working_threads, files_enumerator, num_of_remaining_files, order_num);
+    processReduce(file_names, files_enumerator, num_of_remaining_files, order_num);
   }
-  std::atomic_size_t& num_of_working_threads;
   std::atomic_size_t& num_of_remaining_files;
   notifying_queue::Queue<std::vector<std::string>, false>& map_queue;
   std::condition_variable& may_continue_reading;
@@ -308,7 +258,6 @@ int main(const int argc, const char* const argv[])
   std::condition_variable may_continue;
   std::atomic_size_t blocks_in_memory{0};
 
-  std::atomic_size_t num_of_working_threads{1};
   std::atomic_size_t num_of_remaining_files{0};
   std::atomic_size_t files_enumerator{0};
 
@@ -316,11 +265,10 @@ int main(const int argc, const char* const argv[])
 
   for (std::size_t i{}; i < num_of_threads_to_create; ++i)
   {
-    ThreadAction action{num_of_working_threads, num_of_remaining_files,
+    ThreadAction action{num_of_remaining_files,
                         raw_strings_queue, may_continue, blocks_in_memory, file_names,
                         files_enumerator, i + 1};
 
-    num_of_working_threads.fetch_add(1, std::memory_order_relaxed);
     std::thread t{action};
     t.detach();
   }
@@ -366,7 +314,7 @@ int main(const int argc, const char* const argv[])
 
   //I'm not sure that multithread reduce will be always faster, it depends on current system, disk, cpu, la, ...
   //It need ti be profiled
-  processReduce<true>(file_names, num_of_working_threads, files_enumerator, num_of_remaining_files, 0);
+  processReduce<true>(file_names, files_enumerator, num_of_remaining_files, 0);
 
   return 0;
 }

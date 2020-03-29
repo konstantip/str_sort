@@ -9,6 +9,8 @@
 #include <experimental/filesystem>
 #include <stdexcept>
 
+#include <cstring>
+
 #include <notifying_queue.hpp>
 
 template <typename T>
@@ -68,15 +70,15 @@ void waitAndReserve(std::condition_variable& cv, std::atomic_size_t& blocks_in_m
   portion.reserve(size);
 }
 
-void finalize(std::ifstream& file, const std::string& str, std::ofstream& target)
+void finalize(std::ifstream& file, const char* const str, std::ofstream& target)
 {
   target << str << '\n';
 
   for (;;)
   {
-    std::string tmp;
+    char tmp[1000];
 
-    file >> tmp;
+    file.getline(tmp, 1000);
     if (file.eof())
     {
       break;
@@ -87,18 +89,17 @@ void finalize(std::ifstream& file, const std::string& str, std::ofstream& target
 
 void merge(std::ifstream& file1, std::ifstream& file2, std::ofstream& target)
 {
-  std::string str1, str2;
-  str1.reserve(1000);
-  str2.reserve(1000);
+  char str1[1000];
+  char str2[1000];
   
-  file1 >> str1;
-  file2 >> str2;
+  file1.getline(str1, 1000);
+  file2.getline(str2, 1000);
   for (;;)
   {
-    if (str1 < str2)
+    if (strcmp(str1, str2) < 0)
     {
       target << str1 << '\n';
-      file1 >> str1;
+      file1.getline(str1, 1000);
       if (file1.eof())
       {
         finalize(file2, str2, target);
@@ -108,7 +109,7 @@ void merge(std::ifstream& file1, std::ifstream& file2, std::ofstream& target)
     else
     {
       target << str2 << '\n';
-      file2 >> str2;
+      file2.getline(str2, 1000);
       if (file2.eof())
       {
         finalize(file1, str1, target);

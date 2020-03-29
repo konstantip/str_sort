@@ -312,8 +312,6 @@ int main(const int argc, const char* const argv[])
     waitForFreeMemory(may_continue, blocks_in_memory, num_of_threads);
   }
 
-  //I'm not sure that multithread reduce will be always faster, it depends on current system, disk, cpu, la, ...
-  //It need ti be profiled
   processReduce<true>(file_names, files_enumerator, num_of_remaining_files, 0);
 
   return 0;

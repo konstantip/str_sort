@@ -1,1 +1,0 @@
-/usr/bin/c++     CMakeFiles/sort.dir/main.cpp.o  -o sort -lpthread -lstdc++fs 

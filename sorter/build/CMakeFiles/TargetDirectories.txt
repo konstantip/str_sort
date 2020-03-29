@@ -1,3 +1,0 @@
-/home/pogorelov/test_task/sorter/build/CMakeFiles/rebuild_cache.dir
-/home/pogorelov/test_task/sorter/build/CMakeFiles/sort.dir
-/home/pogorelov/test_task/sorter/build/CMakeFiles/edit_cache.dir

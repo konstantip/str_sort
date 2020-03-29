@@ -1,3 +1,0 @@
-/home/pogorelov/test_task/checker/build/CMakeFiles/rebuild_cache.dir
-/home/pogorelov/test_task/checker/build/CMakeFiles/check.dir
-/home/pogorelov/test_task/checker/build/CMakeFiles/edit_cache.dir

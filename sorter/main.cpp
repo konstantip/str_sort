@@ -318,7 +318,7 @@ int main(const int argc, const char* const argv[])
   {
     ThreadAction action{num_of_working_threads, num_of_remaining_files,
                         raw_strings_queue, may_continue, blocks_in_memory, file_names,
-                        files_enumerator, i};
+                        files_enumerator, i + 1};
 
     num_of_working_threads.fetch_add(1, std::memory_order_relaxed);
     std::thread t{action};

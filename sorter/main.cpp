@@ -51,23 +51,85 @@ constexpr std::size_t max_string_size{1000};
 constexpr std::size_t max_strings_in_memory{120000};
 constexpr std::size_t files_queue_capacity{1024 * 1024};
 
-void waitForFreeMemory(std::condition_variable& cv, std::atomic_size_t& blocks_in_memory,
-                       const std::size_t max_blocks_in_memory)
+struct StringSet
 {
-  std::mutex m;
-  std::unique_lock lk{m};
-  cv.wait(lk, [&blocks_in_memory, max_blocks_in_memory]() noexcept {
-    return blocks_in_memory.fetch_add(0, std::memory_order_relaxed) < max_blocks_in_memory;
-  });
-}
+  StringSet() = default;
 
-void waitAndReserve(std::condition_variable& cv, std::atomic_size_t& blocks_in_memory,
-                    const std::size_t max_blocks_in_memory,
-                    std::vector<std::string>& portion, const std::size_t size)
+  StringSet(const std::size_t size) : arr{new char[1000 * size]}, size{size} {}
+
+  void clear() noexcept
+  {
+    for (std::size_t i = 0; i < size; ++i)
+    {
+      arr[i * 1000] = '\0';
+    }
+  }
+
+  void allocate(const std::size_t new_size)
+  {
+    delete[] arr;
+    arr = nullptr;
+
+    size = new_size;
+    arr = new char[1000 * size];
+  }
+
+  void swap(StringSet& other) noexcept
+  {
+    std::swap(arr, other.arr);
+    std::swap(size, other.size);
+  }
+
+  StringSet(StringSet&& other) noexcept : StringSet()
+  {
+    swap(other);
+  }
+
+  StringSet& operator=(StringSet&& other) noexcept
+  {
+    if (&other == this)
+    {
+      return *this;
+    }
+
+    swap(other);
+
+    return *this;
+  }
+
+  char* operator[](std::size_t n) noexcept
+  {
+    return arr + n * 1000;
+  }
+
+  ~StringSet()
+  {
+    delete[] arr;
+  }
+
+  char* arr{};
+  std::size_t size{};
+};
+
+StringSet waitOrAllocate(notifying_queue::Queue<StringSet, false>& empty_queue, std::size_t& blocks_in_memory,
+                         const std::size_t max_blocks_in_memory, const std::size_t size)
 {
-  waitForFreeMemory(cv, blocks_in_memory, max_blocks_in_memory);
-  blocks_in_memory.fetch_add(1, std::memory_order_relaxed);
-  portion.reserve(size);
+  StringSet set;
+  if (blocks_in_memory < max_blocks_in_memory)
+  {
+    if (!empty_queue.tryPop(set))
+    {
+      set.allocate(size);
+      ++blocks_in_memory;
+    }
+
+    set.clear();
+    return set;
+  }
+
+  empty_queue.waitAndPop(set);
+  set.clear();
+  return set;
 }
 
 void finalize(std::ifstream& file, const char* const str, std::ofstream& target)
@@ -186,7 +248,7 @@ struct ThreadAction
     for (;;)
     {
       {
-        std::vector<std::string> portion;
+	StringSet portion;
         if (!map_queue.waitAndPop(portion))
         {
           break;
@@ -197,30 +259,40 @@ struct ThreadAction
         std::string filename{"tmp" + std::to_string(file_index)};
 
         {
+          std::vector<std::string_view> to_sort;
+	  to_sort.reserve(strs_by_thread);
+	  for (std::size_t i{}; i < strs_by_thread; ++i)
+	  {
+            if (portion[i][0] == '\0')
+	    {
+              break;
+	    }
+            to_sort.push_back(portion[i]);
+	  }
+
           std::ofstream file{filename};
 
-          std::sort(std::begin(portion), std::end(portion));
+          std::sort(std::begin(to_sort), std::end(to_sort));
 
-          for (const auto &str : portion)
+          for (const auto &str : to_sort)
           {
             file << str << '\n';
           }
+	  empty_strings.push(std::move(portion));
         }
-        blocks_in_memory.fetch_sub(1, std::memory_order_relaxed);
-
         file_names.push(std::move(filename));
       }
-      may_continue_reading.notify_one();
     }
 
     processReduce(file_names, files_enumerator, num_of_remaining_files, order_num);
   }
   std::atomic_size_t& num_of_remaining_files;
-  notifying_queue::Queue<std::vector<std::string>, false>& map_queue;
-  std::condition_variable& may_continue_reading;
-  std::atomic_size_t& blocks_in_memory;
+  notifying_queue::Queue<StringSet, false>& map_queue;
+  notifying_queue::Queue<StringSet, false>& empty_strings;
   notifying_queue::DoublePopQueue<std::string>& file_names;
   std::atomic_size_t& files_enumerator;
+
+  const std::size_t strs_by_thread;
 
   const std::size_t order_num;
 };
@@ -251,13 +323,9 @@ int main(const int argc, const char* const argv[])
   const std::size_t strings_by_thread{max_strings_in_memory / num_of_threads};
   const std::size_t num_of_threads_to_create{num_of_threads - 1};
 
-
-  //I could use byte buffers instead of vectors of strings (to avoid allocations), it might increase performance
-  //But I guess allocations is not bottle neck here because io operations probably take much more time
-  //And coding with bytes buffers would take 2 hours more
-  notifying_queue::Queue<std::vector<std::string>, false> raw_strings_queue;
-  std::condition_variable may_continue;
-  std::atomic_size_t blocks_in_memory{0};
+  notifying_queue::Queue<StringSet, false> raw_strings_queue;
+  notifying_queue::Queue<StringSet, false> empty_strings;
+  std::size_t blocks_in_memory{0};
 
   std::atomic_size_t num_of_remaining_files{0};
   std::atomic_size_t files_enumerator{0};
@@ -267,50 +335,45 @@ int main(const int argc, const char* const argv[])
   for (std::size_t i{}; i < num_of_threads_to_create; ++i)
   {
     ThreadAction action{num_of_remaining_files,
-                        raw_strings_queue, may_continue, blocks_in_memory, file_names,
-                        files_enumerator, i + 1};
+                        raw_strings_queue, empty_strings, file_names,
+                        files_enumerator, strings_by_thread, i + 1};
 
     std::thread t{action};
     t.detach();
   }
 
   {
-    std::vector<std::string> strings_portion;
-    waitAndReserve(may_continue, blocks_in_memory, num_of_threads,
-                strings_portion, strings_by_thread);
+    auto portion = waitOrAllocate(empty_strings, blocks_in_memory, num_of_threads, strings_by_thread);
 
     int cnt{};
 
     for (;;)
     {
-      std::string current;
-
-      file >> current;
-
+      file.getline(portion[cnt++], 1000);
       if (file.eof())
       {
-        if (!strings_portion.empty())
+        portion[--cnt][0] = '\0';
+
+        if (cnt)
         {
           num_of_remaining_files.fetch_add(1, std::memory_order_relaxed);
-          raw_strings_queue.push(std::move(strings_portion));
+          raw_strings_queue.push(std::move(portion));
         }
         break;
       }
-      ++cnt;
 
-      strings_portion.push_back(std::move(current));
-      if (strings_portion.size() == strings_by_thread)
+      if (cnt == strings_by_thread)
       {
         num_of_remaining_files.fetch_add(1, std::memory_order_relaxed);
-        raw_strings_queue.push(std::move(strings_portion));
-        waitAndReserve(may_continue, blocks_in_memory, num_of_threads,
-                       strings_portion, strings_by_thread);
+        raw_strings_queue.push(std::move(portion));
+        portion = waitOrAllocate(empty_strings, blocks_in_memory, num_of_threads,
+                                 strings_by_thread);
+	cnt = 0;
       }
     }
 
     raw_strings_queue.finish();
-
-    waitForFreeMemory(may_continue, blocks_in_memory, num_of_threads);
+    empty_strings.finish();
   }
 
   processReduce<true>(file_names, files_enumerator, num_of_remaining_files, 0);

@@ -67,6 +67,11 @@ class Queue
   {
     std::lock_guard lk{m_};
 
+    if (will_not_grow_)
+    {
+      return;
+    }
+
     internalPush(std::move(el));
     ++size_;
 

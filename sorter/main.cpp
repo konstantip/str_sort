@@ -22,13 +22,6 @@ std::string deserializeForStoringQueue<std::string>(std::string&& str)
   return std::move(str);
 }
 
-//It will not be called in our code, but it is too long to write Queue specialisation for std::string
-template <>
-std::vector<std::string> deserializeForStoringQueue<std::vector<std::string>>(std::string&&)
-{
-  return {};
-}
-
 template <typename T>
 std::string serializeForStoringQueue(T&&);
 
@@ -36,12 +29,6 @@ template<>
 std::string serializeForStoringQueue<std::string>(std::string&& str)
 {
   return std::move(str);
-}
-
-template<>
-std::string serializeForStoringQueue<std::vector<std::string>>(std::vector<std::string>&& arg)
-{
-  return {};
 }
 
 //This is the contract

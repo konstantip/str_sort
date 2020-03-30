@@ -55,13 +55,13 @@ struct StringSet
 {
   StringSet() = default;
 
-  StringSet(const std::size_t size) : arr{new char[1000 * size]}, size{size} {}
+  StringSet(const std::size_t size) : arr{new char[str_buffer_size * size]}, size{size} {}
 
   void clear() noexcept
   {
     for (std::size_t i = 0; i < size; ++i)
     {
-      arr[i * 1000] = '\0';
+      arr[i * str_buffer_size] = '\0';
     }
   }
 
@@ -71,7 +71,7 @@ struct StringSet
     arr = nullptr;
 
     size = new_size;
-    arr = new char[1000 * size];
+    arr = new char[str_buffer_size * size];
   }
 
   void swap(StringSet& other) noexcept
@@ -99,7 +99,7 @@ struct StringSet
 
   char* operator[](std::size_t n) noexcept
   {
-    return arr + n * 1000;
+    return arr + n * str_buffer_size;
   }
 
   ~StringSet()
@@ -109,6 +109,8 @@ struct StringSet
 
   char* arr{};
   std::size_t size{};
+
+  static constexpr std::size_t str_buffer_size{max_string_size};
 };
 
 StringSet waitOrAllocate(notifying_queue::Queue<StringSet, false>& empty_queue, std::size_t& blocks_in_memory,
@@ -138,9 +140,9 @@ void finalize(std::ifstream& file, const char* const str, std::ofstream& target)
 
   for (;;)
   {
-    char tmp[1000];
+    char tmp[max_string_size];
 
-    file.getline(tmp, 1000);
+    file.getline(tmp, sizeof(tmp));
     if (file.eof())
     {
       break;
@@ -151,17 +153,17 @@ void finalize(std::ifstream& file, const char* const str, std::ofstream& target)
 
 void merge(std::ifstream& file1, std::ifstream& file2, std::ofstream& target)
 {
-  char str1[1000];
-  char str2[1000];
+  char str1[max_string_size];
+  char str2[max_string_size];
   
-  file1.getline(str1, 1000);
-  file2.getline(str2, 1000);
+  file1.getline(str1, sizeof(str1));
+  file2.getline(str2, sizeof(str2));
   for (;;)
   {
     if (strcmp(str1, str2) < 0)
     {
       target << str1 << '\n';
-      file1.getline(str1, 1000);
+      file1.getline(str1, sizeof(str1));
       if (file1.eof())
       {
         finalize(file2, str2, target);
@@ -171,7 +173,7 @@ void merge(std::ifstream& file1, std::ifstream& file2, std::ofstream& target)
     else
     {
       target << str2 << '\n';
-      file2.getline(str2, 1000);
+      file2.getline(str2, sizeof(str2));
       if (file2.eof())
       {
         finalize(file1, str1, target);
@@ -234,7 +236,7 @@ void processReduce(notifying_queue::DoublePopQueue<std::string>& files_queue,
      
       merge(file1, file2, target_file);
     }
-    files_queue.push(std::move(new_file_name));
+    files_queue.pushForce(std::move(new_file_name));
 
     std::experimental::filesystem::remove(filename1);
     std::experimental::filesystem::remove(filename2);
@@ -249,7 +251,7 @@ struct ThreadAction
     {
       {
 	StringSet portion;
-        if (!map_queue.waitAndPop(portion))
+        if (!strings_buffers.waitAndPop(portion))
         {
           break;
         }
@@ -279,17 +281,17 @@ struct ThreadAction
           {
             file << str << '\n';
           }
-	  empty_strings.push(std::move(portion));
+	  ready_buffers.push(std::move(portion));
         }
-        file_names.push(std::move(filename));
+        file_names.pushForce(std::move(filename));
       }
     }
 
     processReduce(file_names, files_enumerator, num_of_remaining_files, order_num);
   }
   std::atomic_size_t& num_of_remaining_files;
-  notifying_queue::Queue<StringSet, false>& map_queue;
-  notifying_queue::Queue<StringSet, false>& empty_strings;
+  notifying_queue::Queue<StringSet, false>& strings_buffers;
+  notifying_queue::Queue<StringSet, false>& ready_buffers;
   notifying_queue::DoublePopQueue<std::string>& file_names;
   std::atomic_size_t& files_enumerator;
 
@@ -324,8 +326,8 @@ int main(const int argc, const char* const argv[])
   const std::size_t strings_by_thread{max_strings_in_memory / num_of_threads};
   const std::size_t num_of_threads_to_create{num_of_threads - 1};
 
-  notifying_queue::Queue<StringSet, false> raw_strings_queue;
-  notifying_queue::Queue<StringSet, false> empty_strings;
+  notifying_queue::Queue<StringSet, false> strings_buffers;
+  notifying_queue::Queue<StringSet, false> ready_buffers;
   std::size_t blocks_in_memory{0};
 
   std::atomic_size_t num_of_remaining_files{0};
@@ -336,7 +338,7 @@ int main(const int argc, const char* const argv[])
   for (std::size_t i{}; i < num_of_threads_to_create; ++i)
   {
     ThreadAction action{num_of_remaining_files,
-                        raw_strings_queue, empty_strings, file_names,
+                        strings_buffers, ready_buffers, file_names,
                         files_enumerator, strings_by_thread, i + 1};
 
     std::thread t{action};
@@ -344,13 +346,13 @@ int main(const int argc, const char* const argv[])
   }
 
   {
-    auto portion = waitOrAllocate(empty_strings, blocks_in_memory, num_of_threads, strings_by_thread);
+    auto portion = waitOrAllocate(ready_buffers, blocks_in_memory, num_of_threads, strings_by_thread);
 
     int cnt{};
 
     for (;;)
     {
-      file.getline(portion[cnt++], 1000);
+      file.getline(portion[cnt++], StringSet::str_buffer_size);
       if (file.eof())
       {
         portion[--cnt][0] = '\0';
@@ -358,7 +360,7 @@ int main(const int argc, const char* const argv[])
         if (cnt)
         {
           num_of_remaining_files.fetch_add(1, std::memory_order_relaxed);
-          raw_strings_queue.push(std::move(portion));
+          strings_buffers.push(std::move(portion));
         }
         break;
       }
@@ -366,15 +368,15 @@ int main(const int argc, const char* const argv[])
       if (cnt == strings_by_thread)
       {
         num_of_remaining_files.fetch_add(1, std::memory_order_relaxed);
-        raw_strings_queue.push(std::move(portion));
-        portion = waitOrAllocate(empty_strings, blocks_in_memory, num_of_threads,
+        strings_buffers.push(std::move(portion));
+        portion = waitOrAllocate(ready_buffers, blocks_in_memory, num_of_threads,
                                  strings_by_thread);
 	cnt = 0;
       }
     }
 
-    raw_strings_queue.finish();
-    empty_strings.finish();
+    strings_buffers.finish();
+    ready_buffers.finish();
   }
 
   processReduce<true>(file_names, files_enumerator, num_of_remaining_files, 0);

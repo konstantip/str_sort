@@ -65,12 +65,12 @@ class Queue
 
   void push(T el)
   {
-    std::lock_guard lk{m_};
-
-    if (will_not_grow_)
+    if (will_not_grow_.load(std::memory_order_consume))
     {
       return;
     }
+
+    std::lock_guard lk{m_};
 
     internalPush(std::move(el));
     ++size_;
@@ -229,7 +229,7 @@ class DoublePopQueue : public Queue<T, file_storable>
     Base::internalPop(ret);
   }
 
-  void push(T el)
+  void pushForce(T el)
   {
     std::lock_guard lk{Base::m_};
 

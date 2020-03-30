@@ -259,7 +259,7 @@ struct ThreadAction
         std::string filename{"tmp" + std::to_string(file_index)};
 
         {
-          std::vector<std::string_view> to_sort;
+          std::vector<char*> to_sort;
 	  to_sort.reserve(strs_by_thread);
 	  for (std::size_t i{}; i < strs_by_thread; ++i)
 	  {
@@ -272,7 +272,8 @@ struct ThreadAction
 
           std::ofstream file{filename};
 
-          std::sort(std::begin(to_sort), std::end(to_sort));
+          std::sort(std::begin(to_sort), std::end(to_sort), 
+			  [](const char* const str1, const char* const str2) noexcept { return strcmp(str1, str2) < 0; });
 
           for (const auto &str : to_sort)
           {
